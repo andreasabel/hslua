@@ -59,9 +59,11 @@ library
   hs-source-dirs:      src
   exposed-modules:     HsLua.CLI
   build-depends:       base              >= 4.9.1  && < 5
+                     , haskeline         >= 0.8    && < 0.9
                      , hslua-marshalling >= 2.1    && < 2.3
                      , lua               >= 2.1    && < 2.3
                      , text              >= 1.2    && < 2.1
+                     , transformers      >= 0.5
 
 executable hslua
   import:              common-options

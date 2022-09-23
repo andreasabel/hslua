@@ -15,6 +15,7 @@ module HsLua.CLI
   ) where
 
 import Control.Monad (unless, when)
+import Control.Monad.Trans.Class (lift)
 import Data.Bifunctor (first)
 import Data.ByteString (ByteString)
 import Data.Foldable (foldl')
@@ -23,6 +24,7 @@ import Data.Text (Text)
 import Foreign.Ptr (nullPtr)
 import HsLua.Core (LuaE, LuaError)
 import System.Console.GetOpt
+import System.Console.Haskeline hiding (Settings)
 import System.Environment (getArgs)
 import System.IO (hPutStrLn, stderr)
 import qualified Lua.Auxiliary as Lua
@@ -80,6 +82,24 @@ runCode = \case
       then Lua.setglobal g
       else Lua.throwErrorAsException
 
+
+loop :: LuaError e => InputT (LuaE e) ()
+loop = do
+  minput <- getInputLine "% "
+  case minput of
+    Nothing -> return ()
+    Just "quit" -> return ()
+    Just input -> do
+      result <- lift $ do
+        oldtop <- Lua.gettop
+        Lua.dostringTrace $ UTF8.fromString input
+        newtop <- Lua.gettop
+        str <- UTF8.toString <$> Lua.tostring' Lua.top
+        Lua.settop oldtop
+        return str
+      outputStrLn result
+      loop
+
 -- | Uses the first command line argument as the name of a script file
 -- and tries to run that script in Lua. Falls back to stdin if no file
 -- is given. Any remaining args are passed to Lua via the global table
@@ -106,6 +126,9 @@ runApp settings = do
         Lua.liftIO (Lua.luaL_loadfile l nullPtr) >>= \case
           Lua.LUA_OK -> Lua.pcallTrace 0 Lua.multret
           s          -> pure $ Lua.toStatus s
+
+    when (optInteractive opts) $ do
+      runInputT defaultSettings loop
 
     when (result /= Lua.OK)
       Lua.throwErrorAsException
@@ -147,9 +170,7 @@ luaOptions =
     "execute string 'stat'"
 
   , Option "i" []
-    (NoArg $ \opt -> do
-        hPutStrLn stderr "[WARNING] Flag `-i` is not supported yet."
-        return opt { optInteractive = True })
+    (NoArg $ \opt -> return opt { optInteractive = True })
     "interactive mode -- currently not supported"
 
   , Option "l" []
