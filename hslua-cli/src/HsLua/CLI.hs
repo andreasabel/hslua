@@ -52,7 +52,7 @@ getOptions = do
     in concat errs ++ usageInfo usageHead luaOptions
 
   let (mscript, arg) = first listToMaybe $ splitAt 1 args
-  opts <- foldl' (>>=) (return defaultLuaOpts) actions
+  let opts = foldl' (flip ($)) defaultLuaOpts actions
   return opts
     { optScript = mscript
     , optScriptArgs = arg
@@ -92,6 +92,12 @@ runStandalone settings = do
   settingsRunner settings $ do
     -- print version info
     when (optVersion opts) (showVersion $ settingsVersionInfo settings)
+    when (optInteractive opts) $
+      Lua.liftIO (hPutStrLn stderr "[WARNING] Flag `-i` is not supported yet.")
+    when (optNoEnv opts) $
+      Lua.liftIO (hPutStrLn stderr "[WARNING] Flag `-E` is not supported yet.")
+    when (optWarnings opts) $
+      Lua.liftIO (hPutStrLn stderr "[WARNING] Flag `-W` is not supported yet.")
 
     -- push `arg` table
     case optScript opts of
@@ -165,22 +171,20 @@ defaultLuaOpts = Options
   }
 
 -- | Lua command line options.
-luaOptions :: [OptDescr (Options -> IO Options)]
+luaOptions :: [OptDescr (Options -> Options)]
 luaOptions =
   [ Option "e" []
-    (flip ReqArg "stat" $ \stat opt -> return $
+    (flip ReqArg "stat" $ \stat opt ->
         let code = ExecuteCode $ UTF8.fromString stat
         in opt{ optExecute = code:optExecute opt })
     "execute string 'stat'"
 
   , Option "i" []
-    (NoArg $ \opt -> do
-        hPutStrLn stderr "[WARNING] Flag `-i` is not supported yet."
-        return opt { optInteractive = True })
+    (NoArg $ \opt -> opt { optInteractive = True })
     "interactive mode -- currently not supported"
 
   , Option "l" []
-    (flip ReqArg "mod" $ \mod' opt -> return $
+    (flip ReqArg "mod" $ \mod' opt ->
       let toName = Lua.Name . UTF8.fromString
           code = case break (== '=') mod' of
             (glb, '=':m)  -> RequireModule (toName glb) (toName m)
@@ -193,18 +197,14 @@ luaOptions =
      ])
 
   , Option "v" []
-    (NoArg $ \opt -> return opt { optVersion = True })
+    (NoArg $ \opt -> opt { optVersion = True })
     "show version information"
 
   , Option "E" []
-    (NoArg $ \opt -> do
-        hPutStrLn stderr "[WARNING] Flag `-E` is not supported yet."
-        return opt { optNoEnv = True })
+    (NoArg $ \opt -> opt { optNoEnv = True })
     "ignore environment variables -- currently not supported"
 
   , Option "W" []
-    (NoArg $ \opt -> do
-        hPutStrLn stderr "[WARNING] Flag `-W` is not supported yet."
-        return opt { optWarnings = True })
+    (NoArg $ \opt -> opt { optWarnings = True })
     "turn warnings on -- currently not supported"
   ]
