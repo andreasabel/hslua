@@ -120,7 +120,7 @@ runStandalone settings = do
     result <- case optScript opts of
       -- `dofileTrace` should really accept a (Maybe FilePath)
       Just script | script /= "-" -> do
-        Lua.loadfile script >>= \case
+        Lua.loadfile (Just script) >>= \case
           Lua.OK -> do
             mapM_ Lua.pushString (optScriptArgs opts)
             Lua.pcallTrace nargs Lua.multret
