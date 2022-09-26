@@ -56,6 +56,16 @@ executable run-lua
   build-depends:       bytestring
                      , hslua             >= 2.0 && < 2.3
 
+executable hslua-plus
+  import:              common-options
+  main-is:             hslua-plus.hs
+  hs-source-dirs:      hslua-plus
+  build-depends:       bytestring
+                     , hslua             >= 2.0 && < 2.3
+                     , hslua-module-doclayout
+                     , hslua-module-path
+                     , hslua-module-system
+
 executable wishlist
   import:              common-options
   main-is:             wishlist.hs
