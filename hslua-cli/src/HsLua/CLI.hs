@@ -1,3 +1,4 @@
+{-# LANGUAGE CPP               #-}
 {-# LANGUAGE LambdaCase        #-}
 {-# LANGUAGE OverloadedStrings #-}
 {- |
@@ -15,7 +16,8 @@ module HsLua.CLI
   , EnvBehavior (..)
   ) where
 
-import Control.Monad (unless, when, zipWithM_)
+import Control.Applicative ((<|>))
+import Control.Monad (unless, void, when, zipWithM_)
 import Data.Bifunctor (first)
 import Data.ByteString (ByteString)
 import Data.Foldable (foldl')
@@ -24,8 +26,10 @@ import Data.Text (Text)
 import Foreign.C.String (withCString)
 import HsLua.Core (LuaE, LuaError)
 import System.Console.GetOpt
+import System.Console.Isocline
 import System.Environment (lookupEnv)
-import System.IO (hPutStrLn, stderr)
+import System.IO (stderr)
+import qualified Data.ByteString.Char8 as Char8
 import qualified Lua.Constants as Lua
 import qualified Lua.Primary as Lua
 import qualified HsLua.Core as Lua
@@ -33,6 +37,19 @@ import qualified HsLua.Marshalling as Lua
 import qualified Data.Text as T
 import qualified Data.Text.IO as T
 import qualified HsLua.Core.Utf8 as UTF8
+
+#ifndef _WINDOWS
+import System.Posix.IO (stdOutput)
+import System.Posix.Terminal (queryTerminal)
+#endif
+
+-- | Whether the program is connected to a terminal
+istty :: IO Bool
+#ifdef _WINDOWS
+istty = pure True
+#else
+istty = queryTerminal stdOutput
+#endif
 
 -- | Settings for the Lua command line interface.
 --
@@ -80,7 +97,7 @@ getOptions progName rawArgs = do
 showVersion :: LuaError e => Text -> LuaE e ()
 showVersion extraInfo = do
   _ <- Lua.getglobal "_VERSION"
-  versionString <- Lua.forcePeek $ Lua.peekText Lua.top
+  versionString <- Lua.forcePeek $ Lua.peekText Lua.top `Lua.lastly` Lua.pop 1
   Lua.liftIO . T.putStrLn $ versionString `T.append` extraInfo
 
 -- | Runs code given on the command line
@@ -98,6 +115,81 @@ runCode = \case
       then Lua.setglobal g
       else Lua.throwErrorAsException
 
+--
+-- REPL
+--
+
+-- | Setup a new repl. Prints the version and extra info before the
+-- first prompt.
+startRepl :: LuaError e => Text -> LuaE e ()
+startRepl extraInfo = do
+  showVersion extraInfo
+  Lua.try repl >>= \case
+    Right ()  -> pure ()
+    Left err -> do
+      -- something went wrong: report error, reset stack and try again
+      Lua.liftIO $ Char8.hPutStrLn stderr $ UTF8.fromString (show err)
+      Lua.settop 0
+      repl
+
+-- | Checks if the error message hints at incomplete input. Removes the
+-- message from the stack in that case.
+incomplete :: LuaError e => LuaE e Bool
+incomplete = do
+  let eofmark = "<eof>"
+  msg <- Lua.tostring' Lua.top
+  if eofmark `Char8.isSuffixOf` msg
+    then True  <$ Lua.pop 2  -- error message (duplicated by tostring')
+    else False <$ Lua.pop 1  -- value pushed by tostring'
+
+-- | Load an input string, mark it as coming from @stdin@.
+loadinput :: ByteString -> LuaE e Lua.Status
+loadinput inp = Lua.loadbuffer inp "=stdin"
+
+-- | Try to load input while prepending a @return@ statement.
+loadExpression :: LuaError e => ByteString -> LuaE e ()
+loadExpression input = loadinput ("return " <> input) >>= \case
+  Lua.OK -> pure ()  -- yep, that worked
+  _err   -> Lua.throwErrorAsException
+
+-- | Load a multiline statement; prompts for more lines if the statement
+-- looks incomplete.
+loadStatement :: LuaError e
+              => [ByteString]      -- ^ input lines
+              -> LuaE e ()
+loadStatement lns = do
+  loadinput (Char8.unlines $ reverse lns) >>= \case
+    Lua.OK -> pure ()
+    Lua.ErrSyntax -> incomplete >>= \isincmplt ->
+      if isincmplt
+      then Lua.liftIO (readlineMaybe ">") >>= \case
+        Nothing    -> Lua.failLua "Multiline input aborted"
+        Just input -> loadStatement (UTF8.fromString input : lns)
+      else Lua.throwErrorAsException
+    _ -> Lua.throwErrorAsException
+
+-- | Run a Lua repl.
+repl :: LuaError e => LuaE e ()
+repl = Lua.liftIO (readlineMaybe "") >>= \case
+  Nothing -> pure ()
+  Just inputStr -> do
+    let input = UTF8.fromString inputStr
+    loadExpression input <|> loadStatement [input]
+    -- run loaded input
+    Lua.callTrace 0 Lua.multret
+    nvalues <- Lua.gettop
+    when (nvalues > 0) $ do
+      void $ Lua.getglobal "print"
+      Lua.insert (Lua.nthBottom 1)
+      Lua.call (fromIntegral $ Lua.fromStackIndex nvalues) 0
+    Lua.settop 0  -- clear stack
+    repl
+
+
+--
+-- Standalone
+--
+
 -- | Uses the first command line argument as the name of a script file
 -- and tries to run that script in Lua. Falls back to stdin if no file
 -- is given. Any remaining args are passed to Lua via the global table
@@ -113,11 +205,8 @@ runStandalone settings progName args = do
                   then IgnoreEnvVars
                   else ConsultEnvVars
   settingsRunner settings envVarOpt $ do
-    let putErr = Lua.liftIO . hPutStrLn stderr
     -- print version info
     when (optVersion opts) (showVersion $ settingsVersionInfo settings)
-    when (optInteractive opts) $
-      putErr "[WARNING] Flag `-i` is not supported yet."
 
     -- push `arg` table
     case optScript opts of
@@ -153,18 +242,24 @@ runStandalone settings progName args = do
     mapM_ runCode (reverse $ optExecute opts)
 
     let nargs = fromIntegral . length $ optScriptArgs opts
+    let startRepl' = startRepl (settingsVersionInfo settings)
     let handleScriptResult = \case
           Lua.OK -> do
             mapM_ Lua.pushString (optScriptArgs opts)
             status <- Lua.pcallTrace nargs Lua.multret
             when (status /= Lua.OK)
               Lua.throwErrorAsException
+            when (optInteractive opts)
+              startRepl'
           _      -> Lua.throwErrorAsException
+    tty <- Lua.liftIO istty
     case optScript opts of
       Just script | script /= "-" -> do
         Lua.loadfile (Just script) >>= handleScriptResult
       Nothing | optVersion opts || not (null (optExecute opts)) ->
         pure ()
+      _ | tty -> do
+        startRepl'
       _ -> do
         -- load script from stdin
         Lua.loadfile Nothing >>= handleScriptResult
