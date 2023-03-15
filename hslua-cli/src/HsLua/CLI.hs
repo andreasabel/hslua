@@ -73,6 +73,7 @@ data Settings e = Settings
   , settingsRunner      :: EnvBehavior -> LuaE e () -> IO ()
     -- ^ The Lua interpreter to be used; the first argument indicates
     -- whether environment variables should be consulted or ignored.
+  , settingsHistory     :: Maybe FilePath
   }
 
 -- | Whether environment variables should be consulted or ignored.
@@ -123,16 +124,13 @@ runCode = \case
 
 -- | Setup a new repl. Prints the version and extra info before the
 -- first prompt.
-startRepl :: LuaError e => Text -> LuaE e ()
-startRepl extraInfo = do
-  showVersion extraInfo
-  Lua.try repl >>= \case
-    Right ()  -> pure ()
-    Left err -> do
-      -- something went wrong: report error, reset stack and try again
-      Lua.liftIO $ Char8.hPutStrLn stderr $ UTF8.fromString (show err)
-      Lua.settop 0
-      repl
+startRepl :: LuaError e => Settings e -> LuaE e ()
+startRepl settings = do
+  showVersion (settingsVersionInfo settings)
+  case settingsHistory settings of
+    Just histfile -> Lua.liftIO $ setHistory histfile 200
+    Nothing -> pure ()
+  repl
 
 -- | Checks if the error message hints at incomplete input. Removes the
 -- message from the stack in that case.
@@ -172,20 +170,29 @@ loadStatement lns = do
 
 -- | Run a Lua repl.
 repl :: LuaError e => LuaE e ()
-repl = Lua.liftIO (readlineMaybe "") >>= \case
-  Nothing -> pure ()
-  Just inputStr -> do
-    let input = UTF8.fromString inputStr
-    loadExpression input <|> loadStatement [input]
-    -- run loaded input
-    Lua.callTrace 0 Lua.multret
-    nvalues <- Lua.gettop
-    when (nvalues > 0) $ do
-      void $ Lua.getglobal "print"
-      Lua.insert (Lua.nthBottom 1)
-      Lua.call (fromIntegral $ Lua.fromStackIndex nvalues) 0
-    Lua.settop 0  -- clear stack
+repl = Lua.try repl' >>= \case
+  Right ()  -> pure ()  -- Ctrl-D or Ctrl-C
+  Left err -> do
+    -- something went wrong: report error, reset stack and try again
+    Lua.liftIO $ Char8.hPutStrLn stderr $ UTF8.fromString (show err)
+    Lua.settop 0
     repl
+ where
+  repl' :: LuaError e => LuaE e ()
+  repl' = Lua.liftIO (readlineMaybe "") >>= \case
+    Nothing -> pure ()
+    Just inputStr -> do
+      let input = UTF8.fromString inputStr
+      loadExpression input <|> loadStatement [input]
+      -- run loaded input
+      Lua.callTrace 0 Lua.multret
+      nvalues <- Lua.gettop
+      when (nvalues > 0) $ do
+        void $ Lua.getglobal "print"
+        Lua.insert (Lua.nthBottom 1)
+        Lua.call (fromIntegral $ Lua.fromStackIndex nvalues) 0
+      Lua.settop 0  -- clear stack
+      repl
 
 
 --
@@ -244,7 +251,7 @@ runStandalone settings progName args = do
     mapM_ runCode (reverse $ optExecute opts)
 
     let nargs = fromIntegral . length $ optScriptArgs opts
-    let startRepl' = startRepl (settingsVersionInfo settings)
+    let startRepl' = startRepl settings
     let handleScriptResult = \case
           Lua.OK -> do
             mapM_ Lua.pushString (optScriptArgs opts)
