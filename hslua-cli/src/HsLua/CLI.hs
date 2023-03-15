@@ -174,7 +174,9 @@ repl = Lua.try repl' >>= \case
   Right ()  -> pure ()  -- Ctrl-D or Ctrl-C
   Left err -> do
     -- something went wrong: report error, reset stack and try again
-    Lua.liftIO $ Char8.hPutStrLn stderr $ UTF8.fromString (show err)
+    Lua.getglobal "print"
+    Lua.pushException err
+    Lua.call 1 0
     Lua.settop 0
     repl
  where
@@ -192,7 +194,7 @@ repl = Lua.try repl' >>= \case
         Lua.insert (Lua.nthBottom 1)
         Lua.call (fromIntegral $ Lua.fromStackIndex nvalues) 0
       Lua.settop 0  -- clear stack
-      repl
+      repl'
 
 
 --
