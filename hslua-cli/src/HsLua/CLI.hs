@@ -2,6 +2,8 @@
 {-# LANGUAGE LambdaCase        #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE PatternSynonyms   #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeApplications #-}
 {- |
 Module      : HsLua.CLI
 Copyright   : Copyright © 2017-2023 Albert Krewinkel
@@ -22,7 +24,9 @@ import Control.Monad (unless, void, when, zipWithM_)
 import Data.Bifunctor (first)
 import Data.ByteString (ByteString)
 import Data.Foldable (foldl')
+import Data.List (groupBy, uncons)
 import Data.Maybe (listToMaybe)
+import Data.String (IsString (fromString))
 import Data.Text (Text)
 import Foreign.C.String (withCString)
 import Lua.Constants (pattern LUA_COPYRIGHT)
@@ -124,13 +128,63 @@ runCode = \case
 
 -- | Setup a new repl. Prints the version and extra info before the
 -- first prompt.
-startRepl :: LuaError e => Settings e -> LuaE e ()
+startRepl :: forall e. LuaError e => Settings e -> LuaE e ()
 startRepl settings = do
   showVersion (settingsVersionInfo settings)
   case settingsHistory settings of
     Just histfile -> Lua.liftIO $ setHistory histfile 200
     Nothing -> pure ()
+  l <- Lua.state
+  Lua.liftIO $ setDefaultCompleter (completer l)
   repl
+ where
+   completer :: Lua.State -> CompletionEnv -> String -> IO ()
+   completer l cenv input = do
+     case uncons (reverse input) of
+       Just ('.', tser@(_:_)) -> do
+         let rest = reverse tser
+         fields <- Lua.runWith @e l $ do
+           getglobal' (fromString rest) >>= popTableKeys
+         completeWord cenv input Nothing
+           (`completionsFor` fields)
+       _ -> do
+         globals <- Lua.runWith @e l $
+                    Lua.pushglobaltable *> popTableKeys Lua.TypeTable
+         completeWord cenv input Nothing (`completionsFor` globals)
+     completeFileName cenv input Nothing ["."] []
+   popTableKeys = \case
+     Lua.TypeTable ->
+       map fst <$> Lua.forcePeek
+         (Lua.peekKeyValuePairs Lua.peekString (const $ pure ()) Lua.top
+          `Lua.lastly` Lua.pop 1)
+     _ -> [] <$ Lua.pop 1
+
+-- | Like @getglobal@, but knows about packages and nested tables. E.g.
+--
+-- > getglobal' "math.sin"
+--
+-- will return the function @sin@ in package @math@.
+getglobal' :: LuaError e => Lua.Name -> LuaE e Lua.Type
+getglobal' = getnested . splitdot
+
+-- | Gives the list of the longest substrings not containing dots.
+splitdot :: Lua.Name -> [Lua.Name]
+splitdot = map fromString
+  . filter (/= ".")
+  . groupBy (\a b -> a /= '.' && b /= '.')
+  . UTF8.toString
+  . Lua.fromName
+
+-- | Pushes the value described by the strings to the stack; where the first
+-- value is the name of a global variable and the following strings are the
+-- field values in nested tables.
+getnested :: LuaError e => [Lua.Name] -> LuaE e Lua.Type
+getnested [] = return Lua.TypeNil
+getnested (x:xs) = do
+  gtype <- Lua.getglobal x
+  mapM (\a -> Lua.getfield Lua.top a <* Lua.remove (Lua.nth 2)) xs >>= \case
+    [] -> pure gtype
+    xs -> pure $ last xs
 
 -- | Checks if the error message hints at incomplete input. Removes the
 -- message from the stack in that case.
