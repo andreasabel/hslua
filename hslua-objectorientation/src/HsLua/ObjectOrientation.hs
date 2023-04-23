@@ -47,6 +47,8 @@ module HsLua.ObjectOrientation
   , Possible (..)
   , Alias
   , AliasIndex (..)
+    -- * Experiments
+  , forceProperties
   ) where
 
 import Control.Monad ((<$!>), forM_, void, when)
@@ -546,6 +548,24 @@ setList (_pushspec, (peekItem, updateList)) x = (x `updateList`) <$!> do
                   (y:) <$!> itemsAfter (i + 1)
               else getLazyList
       itemsAfter 1
+
+forceProperties :: LuaError e
+                => UDTypeWithList e fn a itemtype
+                -> StackIndex
+                -> LuaE e ()
+forceProperties ty idx = do
+  absidx <- absindex idx
+  obj <- forcePeek $ peekUDGeneric ty absidx
+  getiuservalue absidx 1 >>= \case
+    TypeTable ->
+      forM_ (Map.toList $ udProperties ty) $ \(name, prop) -> do
+        pushName name
+        nresults <- propertyGet prop obj
+        if nresults == 1
+          then rawset (nth 3)
+          else pop (1 + fromIntegral (fromNumResults nresults)) -- key+results
+    _ -> pure ()
+  pop 1 -- uservalue table
 
 --
 -- Typing
