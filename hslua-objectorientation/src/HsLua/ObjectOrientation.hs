@@ -565,11 +565,13 @@ forceProperties' ty obj idx = do
       pushvalue top
       void (setiuservalue absidx 1)
   forM_ (Map.toList $ udProperties ty) $ \(name, prop) -> do
-    pushName name
-    nresults <- propertyGet prop obj
-    if nresults == 1
-      then rawset (nth 3)
-      else pop (1 + fromIntegral (fromNumResults nresults)) -- key+results
+    propertyGet prop obj >>= \case
+      0 -> pure ()
+      1 -> do
+        pushName name
+        insert (nth 2)
+        rawset (nth 3)
+      n -> pop (fromIntegral (fromNumResults n)) -- shouldn't happen
   pop 1 -- uservalue table
 
 forceProperties :: LuaError e
