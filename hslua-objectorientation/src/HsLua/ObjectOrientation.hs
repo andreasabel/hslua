@@ -557,14 +557,18 @@ forceProperties ty idx = do
   absidx <- absindex idx
   obj <- forcePeek $ peekUDGeneric ty absidx
   getiuservalue absidx 1 >>= \case
-    TypeTable ->
-      forM_ (Map.toList $ udProperties ty) $ \(name, prop) -> do
-        pushName name
-        nresults <- propertyGet prop obj
-        if nresults == 1
-          then rawset (nth 3)
-          else pop (1 + fromIntegral (fromNumResults nresults)) -- key+results
-    _ -> pure ()
+    TypeTable -> pure ()
+    _ -> do
+      pop 1   -- previous value
+      newtable
+      pushvalue top
+      void (setiuservalue absidx 1)
+  forM_ (Map.toList $ udProperties ty) $ \(name, prop) -> do
+    pushName name
+    nresults <- propertyGet prop obj
+    if nresults == 1
+      then rawset (nth 3)
+      else pop (1 + fromIntegral (fromNumResults nresults)) -- key+results
   pop 1 -- uservalue table
 
 --
